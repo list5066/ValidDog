@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "ばりっどーぬ - OpenAPI Valid Dog",
+  "name": "ShibaGuard - OpenAPI Validator",
   "version": "1.0.0",
-  "description": "DevToolsでAPIトラフィックをリアルタイム監視し、OpenAPI仕様書に基づいてリクエスト・レスポンスを自動検証。開発中のバグを素早く発見できます。",
+  "description": "Real-time API traffic monitor for DevTools. Automatically validates requests and responses against OpenAPI specifications to catch bugs instantly during development.",
   "icons": {
     "16": "icons/icon16.png",
     "48": "icons/icon48.png",

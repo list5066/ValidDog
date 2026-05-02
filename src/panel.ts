@@ -240,6 +240,22 @@ async function processNetworkRequest(request: chrome.devtools.network.Request): 
       entry.validation = validateEntry(entry);
     }
 
+    // 入口フィルタ: 「仕様書にマッチするもののみ」がONなら、マッチしない・エラー条件に
+    // 合わない запросы を最初から保持しない。性能対策（Vite等の大量ローカルリクエスト対応）。
+    if (filterMatchSpec && validator) {
+      if (!matchesOpenAPISpec(entry.url, entry.method)) {
+        return;
+      }
+      if (filterErrorOnly) {
+        if (
+          !entry.validation ||
+          (entry.validation.requestValid && entry.validation.responseValid)
+        ) {
+          return;
+        }
+      }
+    }
+
     // リストに追加
     trafficList.push(entry);
     if (trafficList.length > 1000) {
@@ -367,10 +383,10 @@ function renderTrafficList(): void {
       }
 
       return `
-      <div class="traffic-item ${isSelected ? 'selected' : ''}" data-id="${entry.id}">
-        <span class="traffic-method ${entry.method}">${entry.method}</span>
-        <span class="traffic-path">${entry.path}</span>
-        <span class="traffic-status ${statusClass}">${entry.response.status}</span>
+      <div class="traffic-item ${isSelected ? 'selected' : ''}" data-id="${escapeHtml(entry.id)}">
+        <span class="traffic-method ${escapeHtml(entry.method)}">${escapeHtml(entry.method)}</span>
+        <span class="traffic-path">${escapeHtml(entry.path)}</span>
+        <span class="traffic-status ${statusClass}">${escapeHtml(String(entry.response.status))}</span>
         ${validationHtml}
       </div>
     `;
@@ -477,7 +493,7 @@ function selectEntry(id: string): void {
   elements.requestQuery.textContent =
     Object.keys(entry.request.queryParams || {}).length > 0
       ? JSON.stringify(entry.request.queryParams, null, 2)
-      : '(なし)';
+      : t('none');
   elements.requestHeaders.textContent = JSON.stringify(entry.request.headers, null, 2);
   elements.requestBody.textContent = entry.request.body
     ? JSON.stringify(entry.request.body, null, 2)
@@ -599,6 +615,11 @@ function translateErrorMessage(err: ValidationError): string {
     METHOD_NOT_ALLOWED: 'errorMethodNotAllowed',
     UNEXPECTED_STATUS_CODE: 'errorUnexpectedStatusCode',
     UNEXPECTED_BODY: 'errorUnexpectedBody',
+    REQUIRED_BODY: 'errorRequiredBody',
+    REQUIRED_PARAM: 'errorRequiredParam',
+    REQUIRED_HEADER: 'errorRequiredHeader',
+    VALIDATION_ERROR: 'errorSchemaValidation',
+    UNRESOLVED_REF: 'errorUnresolvedRef',
   };
 
   const translationKey = err.errorCode ? errorCodeToKey[err.errorCode] : undefined;
@@ -773,7 +794,17 @@ function updateFilterErrorOnlyState(): void {
 async function loadSpec(content: string): Promise<void> {
   try {
     validator = OpenAPIValidator.fromFile(content);
-    await chrome.storage.local.set({ openApiSpec: content });
+    try {
+      await chrome.storage.local.set({ openApiSpec: content });
+    } catch (storageErr) {
+      // ストレージ容量超過などの保存エラー。バリデータはメモリ上で動作するので継続。
+      console.warn('Failed to persist spec to storage:', storageErr);
+      alert(
+        `${t('specLoadError')}: ${
+          storageErr instanceof Error ? storageErr.message : String(storageErr)
+        }`,
+      );
+    }
     updateSpecStatus(true);
     elements.specModal.style.display = 'none';
 

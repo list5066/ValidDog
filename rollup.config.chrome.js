@@ -84,7 +84,7 @@ const backgroundConfig = {
   output: {
     file: 'dist/background.js',
     format: 'iife',
-    sourcemap: true,
+    sourcemap: process.env.SOURCEMAP === 'true',
     name: 'Background'
   },
   plugins: [
@@ -106,7 +106,7 @@ const devtoolsConfig = {
   output: {
     file: 'dist/devtools.js',
     format: 'iife',
-    sourcemap: true,
+    sourcemap: process.env.SOURCEMAP === 'true',
     name: 'DevTools'
   },
   plugins: [
@@ -127,7 +127,7 @@ const panelConfig = {
   output: {
     file: 'dist/panel.js',
     format: 'iife',
-    sourcemap: true,
+    sourcemap: process.env.SOURCEMAP === 'true',
     name: 'Panel'
   },
   plugins: [

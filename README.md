@@ -1,4 +1,6 @@
-# ValidDog (OpenAPI Traffic Validator)
+# ShibaGuard (OpenAPI Traffic Validator)
+
+> **ShibaGuard** is a fork of the [ValidDog](https://github.com/HoppingGanon/ValidDog) project, with security fixes, improved path matching, and additional UX features.
 
 A Chrome DevTools extension that validates API requests and responses based on an OpenAPI specification. It monitors the network traffic of the active page and verifies whether the communication complies with your defined API contract.
 

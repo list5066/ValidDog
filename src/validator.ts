@@ -116,9 +116,10 @@ export class OpenAPIValidator {
    */
   constructor(spec: OpenAPISpec) {
     this.spec = spec;
-    // $ref解決 → スキーマ変換（nullable対応など）の順で処理
+    // $ref解決 → スキーマ変換（nullable対応など） → jsonschemaが落ちる原因の除去
     const resolved = this.resolveRefs(spec);
-    this.resolvedSpec = this.convertSchemaForJsonSchema(resolved);
+    const converted = this.convertSchemaForJsonSchema(resolved);
+    this.resolvedSpec = this.sanitizeForJsonSchema(converted);
     this.jsonValidator = new JsonSchemaValidator();
 
     // コンポーネントスキーマを登録
@@ -127,6 +128,30 @@ export class OpenAPIValidator {
         this.jsonValidator.addSchema(schema, `/components/schemas/${name}`);
       }
     }
+  }
+
+  /**
+   * jsonschema が内部で new URL を呼ぶ際に落ちる原因となるフィールドを除去する。
+   *
+   * jsonschema の scan.js は schema の $id / id / $ref を URL として解釈する
+   * （helpers.resolveUrl → new URL）。値に非ASCII（例: 日本語・キリル）や
+   * 空白等が含まれると "Failed to construct 'URL': Invalid URL" を投げる。
+   *
+   * 本拡張ではバリデーション前に $ref はすべて展開済みなので、残骸として
+   * 紛れ込んだ $id / id / $ref を一律で削除して安全側に倒す。
+   */
+  private sanitizeForJsonSchema(spec: OpenAPISpec): OpenAPISpec {
+    const walk = (obj: unknown): unknown => {
+      if (obj === null || typeof obj !== 'object') return obj;
+      if (Array.isArray(obj)) return obj.map(walk);
+      const result: Record<string, unknown> = {};
+      for (const [key, value] of Object.entries(obj as Record<string, unknown>)) {
+        if (key === '$id' || key === 'id' || key === '$ref' || key === '$schema') continue;
+        result[key] = walk(value);
+      }
+      return result;
+    };
+    return walk(spec) as OpenAPISpec;
   }
 
   /**
@@ -144,10 +169,33 @@ export class OpenAPIValidator {
    */
   private resolveRefs(spec: OpenAPISpec): OpenAPISpec {
     const resolved = JSON.parse(JSON.stringify(spec)) as OpenAPISpec;
+    const root = resolved as unknown as Record<string, unknown>;
+
+    // "#/a/b/c" 形式の内部参照をルートから辿る
+    const lookupInternalRef = (refPath: string): unknown => {
+      if (!refPath.startsWith('#/')) return undefined;
+      const parts = refPath
+        .slice(2)
+        .split('/')
+        .map((p) => p.replace(/~1/g, '/').replace(/~0/g, '~'));
+      let cur: unknown = root;
+      for (const part of parts) {
+        if (cur === null || typeof cur !== 'object') return undefined;
+        cur = (cur as Record<string, unknown>)[part];
+        if (cur === undefined) return undefined;
+      }
+      return cur;
+    };
 
     const resolveRef = (obj: unknown, depth = 0): unknown => {
       // 循環参照を防ぐため深さ制限
-      if (depth > 20) return obj;
+      if (depth > 20) {
+        // 残った $ref は jsonschema が new URL で落ちる原因になるため除去
+        if (obj && typeof obj === 'object' && !Array.isArray(obj) && '$ref' in obj) {
+          return {};
+        }
+        return obj;
+      }
 
       if (obj === null || typeof obj !== 'object') {
         return obj;
@@ -162,14 +210,20 @@ export class OpenAPIValidator {
       // $ref を解決
       if ('$ref' in record && typeof record.$ref === 'string') {
         const refPath = record.$ref;
-        if (refPath.startsWith('#/components/schemas/')) {
-          const schemaName = refPath.replace('#/components/schemas/', '');
-          const schema = resolved.components?.schemas?.[schemaName];
-          if (schema) {
-            return resolveRef({ ...schema }, depth + 1);
+        if (refPath.startsWith('#/')) {
+          const target = lookupInternalRef(refPath);
+          if (target && typeof target === 'object') {
+            const expanded = { ...(target as Record<string, unknown>) };
+            // 元のスキーマ名を title として保持（エラーメッセージで "[subschema N]" の代わりに使う）
+            if (!expanded.title) {
+              const segments = refPath.split('/');
+              expanded.title = segments[segments.length - 1];
+            }
+            return resolveRef(expanded, depth + 1);
           }
         }
-        return record;
+        // 外部参照や未解決の参照は jsonschema に渡すと new URL で例外を投げるため除去
+        return {};
       }
 
       // 再帰的に処理
@@ -191,6 +245,13 @@ export class OpenAPIValidator {
    */
   private convertSchemaForJsonSchema(spec: OpenAPISpec): OpenAPISpec {
     const converted = JSON.parse(JSON.stringify(spec)) as OpenAPISpec;
+
+    // { type: "null" } を表すスキーマかどうか
+    const isNullSchema = (s: unknown): boolean => {
+      if (!s || typeof s !== 'object') return false;
+      const t = (s as Record<string, unknown>).type;
+      return t === 'null' || (Array.isArray(t) && t.includes('null'));
+    };
 
     /**
      * スキーマを変換
@@ -241,16 +302,32 @@ export class OpenAPIValidator {
       // 2. required でないプロパティの場合
       const shouldAllowNull = record.nullable === true || !isRequired;
 
-      if (shouldAllowNull && record.type) {
-        const originalType = record.type;
-        if (Array.isArray(originalType)) {
-          // 既に配列の場合は null を追加
-          if (!originalType.includes('null')) {
-            result.type = [...originalType, 'null'];
+      if (shouldAllowNull) {
+        if (record.type) {
+          // type がある場合は配列に "null" を追加
+          const originalType = record.type;
+          if (Array.isArray(originalType)) {
+            if (!originalType.includes('null')) {
+              result.type = [...originalType, 'null'];
+            }
+          } else {
+            result.type = [originalType, 'null'];
           }
-        } else {
-          // 単一型の場合は配列に変換
-          result.type = [originalType, 'null'];
+        } else if (Array.isArray(result.oneOf)) {
+          // oneOf に { type: "null" } を追加
+          if (!(result.oneOf as unknown[]).some((s) => isNullSchema(s))) {
+            result.oneOf = [...(result.oneOf as unknown[]), { type: 'null' }];
+          }
+        } else if (Array.isArray(result.anyOf)) {
+          if (!(result.anyOf as unknown[]).some((s) => isNullSchema(s))) {
+            result.anyOf = [...(result.anyOf as unknown[]), { type: 'null' }];
+          }
+        } else if (Array.isArray(result.allOf)) {
+          // allOf を anyOf 風に包む: { anyOf: [{ allOf: [...] }, { type: "null" }] }
+          const allOfWrapped = { allOf: result.allOf, title: result.title };
+          delete result.allOf;
+          delete result.title;
+          result.anyOf = [allOfWrapped, { type: 'null' }];
         }
       }
 
@@ -338,17 +415,51 @@ export class OpenAPIValidator {
 
   /**
    * パス文字列からOpenAPI仕様書のパスパターンにマッチするものを検索
+   * @param actualPath - 実際のリクエストパス
+   * @param method - 指定するとそのメソッドが定義されているパターンのみ候補にする
+   *
+   * 複数のパターンがマッチした場合、より具体的なもの（リテラルセグメントが多いもの）を優先する。
+   * 例: "/users/me" は "/users/me" と "/users/{id}" の両方にマッチするが前者を選ぶ。
    */
-  findMatchingPath(actualPath: string): { pattern: string; params: Record<string, string> } | null {
-    const pathWithoutQuery = actualPath.split('?')[0];
+  findMatchingPath(
+    actualPath: string,
+    method?: HttpMethod,
+  ): { pattern: string; params: Record<string, string> } | null {
+    let pathWithoutQuery = actualPath.split('?')[0];
+    // trailing slash を正規化（ルート "/" はそのまま）
+    if (pathWithoutQuery.length > 1 && pathWithoutQuery.endsWith('/')) {
+      pathWithoutQuery = pathWithoutQuery.slice(0, -1);
+    }
+
+    type Candidate = {
+      pattern: string;
+      params: Record<string, string>;
+      literalSegments: number;
+      paramSegments: number;
+    };
+    const candidates: Candidate[] = [];
 
     for (const pattern of Object.keys(this.resolvedSpec.paths)) {
       const params = matchPath(pattern, pathWithoutQuery);
-      if (params !== null) {
-        return { pattern, params };
-      }
+      if (params === null) continue;
+      if (method && !this.resolvedSpec.paths[pattern][method]) continue;
+
+      const segments = pattern.split('/').filter(Boolean);
+      const paramSegments = segments.filter((s) => /^\{[^}]+\}$/.test(s)).length;
+      const literalSegments = segments.length - paramSegments;
+      candidates.push({ pattern, params, literalSegments, paramSegments });
     }
-    return null;
+
+    if (candidates.length === 0) return null;
+
+    // 優先順位: リテラルセグメントが多い → パラメータが少ない → パターン文字列が長い
+    candidates.sort((a, b) => {
+      if (b.literalSegments !== a.literalSegments) return b.literalSegments - a.literalSegments;
+      if (a.paramSegments !== b.paramSegments) return a.paramSegments - b.paramSegments;
+      return b.pattern.length - a.pattern.length;
+    });
+
+    return { pattern: candidates[0].pattern, params: candidates[0].params };
   }
 
   /**
@@ -357,7 +468,9 @@ export class OpenAPIValidator {
   validateRequest(request: RequestInfo): ValidationResult {
     const errors: ValidationError[] = [];
 
-    const matched = this.findMatchingPath(request.path);
+    // メソッド付きで一致するパターンを優先的に探し、無ければ method 抜きで探す
+    const matched =
+      this.findMatchingPath(request.path, request.method) ?? this.findMatchingPath(request.path);
     if (!matched) {
       return {
         valid: false,
@@ -418,8 +531,8 @@ export class OpenAPIValidator {
         ) {
           errors.push({
             path: 'body',
-            message: 'リクエストボディは必須です',
-            errorCode: 'REQUIRED',
+            message: 'Request body is required',
+            errorCode: 'REQUIRED_BODY',
             location: 'body',
           });
         } else if (request.body !== undefined && request.body !== null) {
@@ -440,7 +553,8 @@ export class OpenAPIValidator {
   validateResponse(request: RequestInfo, response: ResponseInfo): ValidationResult {
     const errors: ValidationError[] = [];
 
-    const matched = this.findMatchingPath(request.path);
+    const matched =
+      this.findMatchingPath(request.path, request.method) ?? this.findMatchingPath(request.path);
     if (!matched) {
       return {
         valid: false,
@@ -541,9 +655,10 @@ export class OpenAPIValidator {
       if (param.required && (value === undefined || value === '')) {
         errors.push({
           path: param.name,
-          message: `必須パラメータ "${param.name}" がありません`,
-          errorCode: 'REQUIRED',
+          message: `Required parameter "${param.name}" is missing`,
+          errorCode: 'REQUIRED_PARAM',
           location,
+          params: { name: param.name },
         });
         continue;
       }
@@ -593,9 +708,10 @@ export class OpenAPIValidator {
       if (headerSpec.required && (value === undefined || value === '')) {
         errors.push({
           path: `header.${headerName}`,
-          message: `必須レスポンスヘッダー "${headerName}" がありません`,
-          errorCode: 'REQUIRED',
+          message: `Required response header "${headerName}" is missing`,
+          errorCode: 'REQUIRED_HEADER',
           location: 'header',
+          params: { name: headerName },
         });
         continue;
       }
@@ -649,9 +765,26 @@ export class OpenAPIValidator {
             }
           }
 
+          // oneOf/anyOf/allOf エラーの場合、subschema の中身を人間可読に展開
+          let message = error.message;
+          if (
+            error.schema &&
+            typeof error.schema === 'object' &&
+            (error.name === 'oneOf' || error.name === 'anyOf' || error.name === 'allOf')
+          ) {
+            const sch = error.schema as Record<string, unknown>;
+            const subs = sch[error.name] as unknown[] | undefined;
+            if (Array.isArray(subs)) {
+              const labels = subs.map((s) => this.describeSubschema(s));
+              expected = labels.join(' | ');
+              const actualType = this.getTypeName(error.instance);
+              message = `value (${actualType}) does not match any of: ${labels.join(' | ')}`;
+            }
+          }
+
           errors.push({
             path: error.property ? `${path}.${error.property.replace('instance.', '')}` : path,
-            message: error.message,
+            message,
             errorCode: error.name,
             location: path,
             actualValue: error.instance,
@@ -661,10 +794,15 @@ export class OpenAPIValidator {
         }
       }
     } catch (e) {
+      const raw = e instanceof Error ? e.message : String(e);
+      const isUrlError = raw.includes('Failed to construct');
       errors.push({
         path,
-        message: `スキーマ検証中にエラー: ${e instanceof Error ? e.message : String(e)}`,
-        errorCode: 'VALIDATION_ERROR',
+        message: isUrlError
+          ? `Unresolved $ref remains in the schema (${raw})`
+          : `Error during schema validation: ${raw}`,
+        errorCode: isUrlError ? 'UNRESOLVED_REF' : 'VALIDATION_ERROR',
+        params: { detail: raw },
       });
     }
   }
@@ -677,6 +815,36 @@ export class OpenAPIValidator {
     if (value === undefined) return 'undefined';
     if (Array.isArray(value)) return 'array';
     return typeof value;
+  }
+
+  /**
+   * サブスキーマを人間可読なラベルに変換する
+   * 例: { title: "BonusAuthorObject", type: "object" } → "BonusAuthorObject"
+   *     { type: "null" } → "null"
+   *     { type: "string", enum: ["a","b"] } → "string(a | b)"
+   *     { oneOf: [...] } → "(A | B)"
+   */
+  private describeSubschema(s: unknown): string {
+    if (s === null || typeof s !== 'object') return 'unknown';
+    const sch = s as Record<string, unknown>;
+    if (typeof sch.title === 'string' && sch.title) return sch.title;
+    if (sch.type !== undefined) {
+      const t = Array.isArray(sch.type) ? sch.type.join(' | ') : String(sch.type);
+      if (Array.isArray(sch.enum)) return `${t}(${sch.enum.join(' | ')})`;
+      return t;
+    }
+    if (Array.isArray(sch.enum)) return sch.enum.map((v) => JSON.stringify(v)).join(' | ');
+    for (const key of ['oneOf', 'anyOf', 'allOf'] as const) {
+      const sub = sch[key];
+      if (Array.isArray(sub)) {
+        return `(${sub.map((x) => this.describeSubschema(x)).join(' | ')})`;
+      }
+    }
+    if (typeof sch.$ref === 'string') {
+      const seg = sch.$ref.split('/');
+      return seg[seg.length - 1];
+    }
+    return 'object';
   }
 
   /**
@@ -707,13 +875,8 @@ export class OpenAPIValidator {
    * @returns マッチする場合はtrue、しない場合はfalse
    */
   hasOperation(actualPath: string, method: HttpMethod): boolean {
-    const matched = this.findMatchingPath(actualPath);
-    if (!matched) {
-      return false;
-    }
-
-    const pathItem = this.resolvedSpec.paths[matched.pattern];
-    return !!pathItem[method];
+    // method を渡すことで、別パターンにマッチして method 不一致になる誤判定を防ぐ
+    return this.findMatchingPath(actualPath, method) !== null;
   }
 }
 
@@ -730,33 +893,53 @@ export function parseOpenAPISpec(content: string): OpenAPISpec {
   if (trimmed.startsWith('{')) {
     return JSON.parse(content) as OpenAPISpec;
   } else {
-    return yaml.load(content) as OpenAPISpec;
+    return yaml.load(content, { schema: yaml.JSON_SCHEMA }) as OpenAPISpec;
   }
 }
 
 /**
- * パスパターンと実際のパスをマッチング（後方一致）
- * BaseURLが異なる場合でも、パス部分が一致すればマッチする
- * 例: パターン "/auth" は "/bbb/auth" にもマッチする
+ * パスパターンと実際のパスをマッチング（セグメント単位の後方一致）
+ *
+ * パターンのセグメント数と末尾から同じだけのセグメントが完全一致する必要がある。
+ * これにより BaseURL を含むパスもマッチするが、パターンより細かいパスや、
+ * セグメント境界をまたぐ部分一致は除外される。
+ *
+ * 例:
+ *   "/auth"          は "/api/v1/auth"            にマッチ（末尾1セグメント "auth" が一致）
+ *   "/auth"          は "/api/auth/login"         にマッチしない（末尾は "login"）
+ *   "/users/{id}"    は "/api/v1/users/27"        にマッチ
+ *   "/assets/{name}" は "/src/shared/api/v0/assets/index.ts" にマッチしない
+ *                       （"/assets" の前にも実パスのセグメントがあるが末尾2セグメントは
+ *                        "assets/index.ts" — 末尾セグメント数は合うのでマッチする）
+ *
+ * 注: 上の最後の例は実際にはマッチする。完全に防ぐにはサーバURLを考慮する必要があるが、
+ * 少なくとも "/auth" 1セグメントのパターンが任意の深いパスを誤って拾うことは防げる。
  */
 export function matchPath(pattern: string, actualPath: string): Record<string, string> | null {
-  const paramNames: string[] = [];
-  const regexPattern = pattern.replace(/\{([^}]+)\}/g, (_, paramName) => {
-    paramNames.push(paramName);
-    return '([^/]+)';
-  });
+  const patternSegments = pattern.split('/').filter((s) => s.length > 0);
+  const actualSegments = actualPath.split('/').filter((s) => s.length > 0);
 
-  // 後方一致でマッチング（BaseURLに依存しない）
-  const regex = new RegExp(`${regexPattern}$`);
-  const match = actualPath.match(regex);
-
-  if (!match) {
+  // 実パスはパターンと同じか、それより長い前置パス（BaseURL等）を含むことを許容
+  if (actualSegments.length < patternSegments.length) {
     return null;
   }
 
+  // 末尾から patternSegments.length 個のセグメントを取り出す
+  const tailSegments = actualSegments.slice(actualSegments.length - patternSegments.length);
+
   const params: Record<string, string> = {};
-  for (let i = 0; i < paramNames.length; i++) {
-    params[paramNames[i]] = match[i + 1];
+  for (let i = 0; i < patternSegments.length; i++) {
+    const ps = patternSegments[i];
+    const as = tailSegments[i];
+    const paramMatch = ps.match(/^\{([^}]+)\}$/);
+    if (paramMatch) {
+      // パラメータセグメント: 任意の値（空でない）を許容
+      if (as.length === 0) return null;
+      params[paramMatch[1]] = decodeURIComponent(as);
+    } else if (ps !== as) {
+      // リテラルセグメント: 完全一致が必要
+      return null;
+    }
   }
 
   return params;
@@ -793,13 +976,3 @@ export function extractMediaType(contentType: string | undefined): string {
   return contentType.split(';')[0].trim();
 }
 
-// =============================================================================
-// ブラウザ向けエクスポート
-// =============================================================================
-
-if (typeof window !== 'undefined') {
-  (window as unknown as Record<string, unknown>).OpenAPIValidator = OpenAPIValidator;
-  (window as unknown as Record<string, unknown>).parseOpenAPISpec = parseOpenAPISpec;
-  (window as unknown as Record<string, unknown>).matchPath = matchPath;
-  (window as unknown as Record<string, unknown>).parseQueryString = parseQueryString;
-}

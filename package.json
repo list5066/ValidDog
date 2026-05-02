@@ -1,7 +1,7 @@
 {
-  "name": "valid-dog",
+  "name": "shibaguard-extension",
   "version": "0.9.0",
-  "description": "ValidDog - OpenAPI Validator Chrome Extension",
+  "description": "ShibaGuard - OpenAPI Validator Chrome Extension (fork of ValidDog)",
   "type": "module",
   "scripts": {
     "build": "rollup -c rollup.config.chrome.js",

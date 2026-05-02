@@ -43,13 +43,19 @@ export type TranslationKey =
   | 'errorMethodNotAllowed'
   | 'errorUnexpectedStatusCode'
   | 'errorUnexpectedBody'
+  | 'errorRequiredBody'
+  | 'errorRequiredParam'
+  | 'errorRequiredHeader'
+  | 'errorSchemaValidation'
+  | 'errorUnresolvedRef'
+  | 'none'
   | 'chooseFile'
   | 'noFileSelected';
 
 /** 翻訳データ */
 const translations: Record<Language, Record<TranslationKey, string>> = {
   ja: {
-    title: 'ばりっどーぬ - ValidDog',
+    title: 'ばりっどーぬ - ShibaGuard',
     loadSpec: '仕様書',
     clearTraffic: '履歴削除',
     noTraffic: 'トラフィックがありません',
@@ -87,11 +93,17 @@ const translations: Record<Language, Record<TranslationKey, string>> = {
     errorUnexpectedStatusCode:
       'ステータスコード {statusCode} は "{path}" の "{method}" に定義されていません',
     errorUnexpectedBody: '204 No Content レスポンスにはボディを含めるべきではありません',
+    errorRequiredBody: 'リクエストボディは必須です',
+    errorRequiredParam: '必須パラメータ "{name}" がありません',
+    errorRequiredHeader: '必須レスポンスヘッダー "{name}" がありません',
+    errorSchemaValidation: 'スキーマ検証中にエラー: {detail}',
+    errorUnresolvedRef: 'スキーマに未解決の $ref が残っています ({detail})',
+    none: '(なし)',
     chooseFile: 'ファイルを選択',
     noFileSelected: '選択されていません',
   },
   en: {
-    title: 'ValidDog',
+    title: 'ShibaGuard',
     loadSpec: 'Spec',
     clearTraffic: 'Clear',
     noTraffic: 'No traffic',
@@ -128,6 +140,12 @@ const translations: Record<Language, Record<TranslationKey, string>> = {
     errorMethodNotAllowed: 'Method "{method}" is not defined for path "{path}"',
     errorUnexpectedStatusCode: 'Status code {statusCode} is not defined for "{method}" "{path}"',
     errorUnexpectedBody: '204 No Content response should not contain a body',
+    errorRequiredBody: 'Request body is required',
+    errorRequiredParam: 'Required parameter "{name}" is missing',
+    errorRequiredHeader: 'Required response header "{name}" is missing',
+    errorSchemaValidation: 'Error during schema validation: {detail}',
+    errorUnresolvedRef: 'Unresolved $ref remains in the schema ({detail})',
+    none: '(none)',
     chooseFile: 'Choose File',
     noFileSelected: 'No file selected',
   },
