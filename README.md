@@ -1,44 +1,27 @@
-# ValidDog
+# ValidDog (OpenAPI Traffic Validator)
 
-OpenAPI仕様書に基づいてAPIレスポンスを検証するChrome拡張機能です。  
-開いているページのネットワーク通信を監視し、OpenAPI仕様書に沿った動作となっているかを確認します。
+A Chrome DevTools extension that validates API requests and responses based on an OpenAPI specification. It monitors the network traffic of the active page and verifies whether the communication complies with your defined API contract.
 
-## 開発環境
+## Key Features
 
-DevContainerを使用しています。
+- **Real-time Monitoring:** Captures HTTP traffic while DevTools is open.
+- **Schema Validation:** Automatically checks request/response bodies, headers, and parameters against your OpenAPI (Swagger) file.
+- **Visual Feedback:** Instantly highlights discrepancies and validation errors.
 
-### セットアップ
+## Development Environment
 
-1. VS Code または Cursor で本リポジトリを開く
-2. 「Reopen in Container」を選択して DevContainer を起動
+This project uses **DevContainers** for a consistent development experience.
 
-### Git SSH設定
+### Setup
 
-以下のいずれかの方法でGit用のSSH鍵を設定できます：
+1. Open this repository in **VS Code** or **Cursor**.
+2. Select **"Reopen in Container"** when prompted (or via the Command Palette) to start the DevContainer.
 
-- `.devcontainer/.ssh/` フォルダに秘密鍵を配置する
-- DevContainer内で `ssh-keygen` を実行して鍵を生成する
+### Git SSH Configuration
 
-## ディレクトリ構成
+You can set up your SSH keys for Git using one of the following methods:
 
-```
-.
-├── src/           # Chrome拡張機能のソースコード
-├── test/          # テスト用ファイル群（詳細は test/README.md を参照）
-├── dist/          # ビルド出力（npm run build で生成）
-└── .devcontainer/ # 開発環境設定
-```
+- Place your private key in the `.devcontainer/.ssh/` folder.
+- Run `ssh-keygen` inside the DevContainer terminal to generate a new key.
 
-## ビルド
-
-```bash
-npm install
-npm run build
-```
-
-ビルド後、`dist/` フォルダをChromeの拡張機能として読み込んでください。
-
-## テスト
-
-テスト環境の詳細は [test/README.md](./test/README.md) を参照してください。
-
+## Project Structure
